@@ -786,7 +786,7 @@ impl Server {
             Packet::OnionRequest0(packet) =>
                 self.handle_onion_request_0(packet, addr).boxed(),
             Packet::OnionRequest1(packet) =>
-                self.handle_onion_request_1(&packet, addr).boxed(),
+                self.handle_onion_request_1(packet, addr).boxed(),
             Packet::OnionRequest2(packet) =>
                 self.handle_onion_request_2(&packet, addr).boxed(),
             Packet::OnionAnnounceRequest(packet) =>
@@ -1285,29 +1285,32 @@ impl Server {
 
     /// Handle received `OnionRequest1` packet and send `OnionRequest2` packet
     /// to the next peer.
-    fn handle_onion_request_1(&self, packet: &OnionRequest1, addr: SocketAddr)
+    fn handle_onion_request_1(&self, packet: OnionRequest1, addr: SocketAddr)
         -> impl Future<Output = Result<(), HandlePacketError>> + Send {
         let onion_symmetric_key = self.onion_symmetric_key.read();
-        let shared_secret = self.precomputed_keys.get(packet.temporary_pk);
-        let payload = packet.get_payload(&shared_secret);
-        let payload = match payload {
-            Err(e) => return Either::Left(future::err(e.context(HandlePacketErrorKind::GetPayload).into())),
-            Ok(payload) => payload,
-        };
-
         let onion_return = OnionReturn::new(
             &onion_symmetric_key,
             &IpPort::from_udp_saddr(addr),
             Some(&packet.onion_return)
         );
-        let next_packet = Packet::OnionRequest2(OnionRequest2 {
-            nonce: packet.nonce,
-            temporary_pk: payload.temporary_pk,
-            payload: payload.inner,
-            onion_return
-        });
-        Either::Right(self.send_to(payload.ip_port.to_saddr(), next_packet)
-            .map_err(|e| e.context(HandlePacketErrorKind::SendTo).into()))
+        let server = self.clone();
+        async move {
+            let shared_secret = server.precomputed_keys.get2(packet.temporary_pk).await;
+            let payload = packet.get_payload(&shared_secret);
+            let payload = match payload {
+                Err(e) => return Err(e.context(HandlePacketErrorKind::GetPayload).into()),
+                Ok(payload) => payload,
+            };
+            let next_packet = Packet::OnionRequest2(OnionRequest2 {
+                nonce: packet.nonce,
+                temporary_pk: payload.temporary_pk,
+                payload: payload.inner,
+                onion_return,
+            });
+            server.send_to(payload.ip_port.to_saddr(), next_packet)
+                .map_err(|e| e.context(HandlePacketErrorKind::SendTo).into())
+                .await
+        }
     }
 
     /// Handle received `OnionRequest2` packet and send `OnionAnnounceRequest`
