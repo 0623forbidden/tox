@@ -75,6 +75,19 @@ impl PingRequest {
             payload,
         }
     }
+    /// create new PingRequest object
+    pub fn new2(shared_secret: &PrecomputedKey, pk: &PublicKey, payload: &PingRequestPayload) -> PingRequest {
+        let nonce = gen_nonce();
+        let mut buf = [0; MAX_DHT_PACKET_SIZE];
+        let (_, size) = payload.to_bytes((&mut buf, 0)).unwrap();
+        let payload = seal_precomputed(&buf[..size], &nonce, shared_secret);
+
+        PingRequest {
+            pk: *pk,
+            nonce,
+            payload,
+        }
+    }
     /** Decrypt payload and try to parse it as `PingRequestPayload`.
 
     Returns `Error` in case of failure:

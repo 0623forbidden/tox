@@ -641,12 +641,16 @@ impl Server {
         let payload = PingRequestPayload {
             id: request_queue.new_ping_id(node.pk),
         };
-        let ping_req = Packet::PingRequest(PingRequest::new(
-            &self.precomputed_keys.get(node.pk),
-            &self.pk,
-            &payload
-        ));
-        self.send_to(node.saddr, ping_req)
+        let server = self.clone();
+        let node = node.clone();
+        async move {
+            let ping_req = Packet::PingRequest(PingRequest::new(
+                &server.precomputed_keys.get2(node.pk).await,
+                &server.pk,
+                &payload,
+            ));
+            server.send_to(node.saddr, ping_req).await
+        }
     }
 
     /// Send `NodesRequest` packet to the node.
@@ -662,12 +666,18 @@ impl Server {
             pk: search_pk,
             id: request_queue.new_ping_id(node.pk),
         };
-        let nodes_req = Packet::NodesRequest(NodesRequest::new(
-            &self.precomputed_keys.get(node.pk),
-            &self.pk,
-            &payload
-        ));
-        Either::Right(self.send_to(node.saddr, nodes_req).boxed())
+        let node = node.clone();
+        let server = self.clone();
+        Either::Right(
+            async move {
+                let nodes_req = Packet::NodesRequest(NodesRequest::new(
+                    &server.precomputed_keys.get2(node.pk).await,
+                    &server.pk,
+                    &payload,
+                ));
+                server.send_to(node.saddr, nodes_req).await
+            }.boxed()
+        )
     }
 
     /// Send `NatPingRequest` packet to all friends and try to punch holes.
@@ -690,13 +700,17 @@ impl Server {
                     let payload = DhtRequestPayload::NatPingRequest(NatPingRequest {
                         id: friend.hole_punch.ping_id,
                     });
-                    let nat_ping_req_packet = DhtRequest::new(
-                        &self.precomputed_keys.get(friend.pk),
-                        &friend.pk,
-                        &self.pk,
-                        &payload
-                    );
-                    let nat_ping_future = self.send_nat_ping_req_inner(friend, nat_ping_req_packet);
+                    let server = self.clone();
+                    let friend = friend.clone();
+                    let nat_ping_future = async move {
+                        let nat_ping_req_packet = DhtRequest::new(
+                            &server.precomputed_keys.get2(friend.pk).await,
+                            &friend.pk,
+                            &server.pk,
+                            &payload,
+                        );
+                        server.send_nat_ping_req_inner(&friend, nat_ping_req_packet).await
+                    };
 
                     Either::Left(future::try_join(punch_future, nat_ping_future).map_ok(drop))
                 } else {
@@ -712,22 +726,23 @@ impl Server {
     fn punch_holes(&self, request_queue: &mut RequestQueue<PublicKey>, friend: &mut DhtFriend, returned_addrs: &[SocketAddr])
         -> impl Future<Output = Result<(), mpsc::SendError>> + Send + 'static {
         let punch_addrs = friend.hole_punch.next_punch_addrs(returned_addrs);
-
-        let packets = punch_addrs.into_iter().map(|addr| {
-            let payload = PingRequestPayload {
-                id: request_queue.new_ping_id(friend.pk),
-            };
+        let mut tx = self.tx.clone();
+        let payload = PingRequestPayload {
+            id: request_queue.new_ping_id(friend.pk),
+        };
+        let server = self.clone();
+        let friend_pk = friend.pk.clone();
+        async move {
             let packet = Packet::PingRequest(PingRequest::new(
-                &self.precomputed_keys.get(friend.pk),
-                &self.pk,
-                &payload
+                &server.precomputed_keys.get2(friend_pk).await,
+                &server.pk,
+                &payload,
             ));
 
-            (packet, addr)
-        }).collect::<Vec<_>>();
+            let packets = punch_addrs.into_iter().map(|addr| {
+                (packet.clone(), addr)
+            }).collect::<Vec<_>>();
 
-        let mut tx = self.tx.clone();
-        async move {
             let mut stream = futures::stream::iter(packets).map(Ok);
             tx.send_all(&mut stream).await
         }
@@ -751,9 +766,9 @@ impl Server {
     pub fn handle_packet(&self, packet: Packet, addr: SocketAddr) -> impl Future<Output = Result<(), HandlePacketError>> + Send {
         match packet {
             Packet::PingRequest(packet) =>
-                self.handle_ping_req(&packet, addr).boxed(),
+                self.handle_ping_req(packet, addr).boxed(),
             Packet::PingResponse(packet) =>
-                self.handle_ping_resp(&packet, addr).boxed(),
+                self.handle_ping_resp(packet, addr).boxed(),
             Packet::NodesRequest(packet) =>
                 self.handle_nodes_req(&packet, addr).boxed(),
             Packet::NodesResponse(packet) =>
@@ -809,79 +824,87 @@ impl Server {
     /// Handle received `PingRequest` packet and response with `PingResponse`
     /// packet. If node that sent this packet is not present in close nodes list
     /// and can be added there then it will be added to ping list.
-    fn handle_ping_req(&self, packet: &PingRequest, addr: SocketAddr)
+    fn handle_ping_req(&self, packet: PingRequest, addr: SocketAddr)
         -> impl Future<Output = Result<(), HandlePacketError>> + Send {
-        let precomputed_key = self.precomputed_keys.get(packet.pk);
-        let payload = match packet.get_payload(&precomputed_key) {
-            Err(e) => return Either::Left(
-                future::err(e.context(HandlePacketErrorKind::GetPayload).into())
-            ),
-            Ok(payload) => payload,
-        };
+        let server = self.clone();
+        async move {
+            let precomputed_key = server.precomputed_keys.get2(packet.pk).await;
+            let payload = match packet.get_payload(&precomputed_key) {
+                Err(e) => return future::err(e.context(HandlePacketErrorKind::GetPayload).into()).await,
+                Ok(payload) => payload,
+            };
 
-        let resp_payload = PingResponsePayload {
-            id: payload.id,
-        };
-        let ping_resp = Packet::PingResponse(PingResponse::new(
-            &precomputed_key,
-            &self.pk,
-            &resp_payload
-        ));
+            let resp_payload = PingResponsePayload {
+                id: payload.id,
+            };
+            let ping_resp = Packet::PingResponse(PingResponse::new(
+                &precomputed_key,
+                &server.pk,
+                &resp_payload,
+            ));
 
-        Either::Right(
             future::try_join(
-                self.ping_add(&PackedNode::new(addr, &packet.pk)),
-                self.send_to(addr, ping_resp)
+                server.ping_add(&PackedNode::new(addr, &packet.pk)),
+                server.send_to(addr, ping_resp),
             )
-            .map_ok(drop)
-            .map_err(|e| e.context(HandlePacketErrorKind::SendTo).into())
-        )
+                .map_ok(drop)
+                .map_err(|e| e.context(HandlePacketErrorKind::SendTo).into())
+                .await
+        }
+    }
+
+    /// Adapt `RequestQueue.check_ping_id()`.
+    fn check_ping_id(&self, ping_id: u64, packet_pk: &PublicKey) -> bool {
+        let mut request_queue = self.request_queue.write();
+        request_queue.check_ping_id(ping_id, |pk| packet_pk.eq(pk)).is_some()
     }
 
     /// Add node to close list after we received a response from it. If it's a
     /// friend then send it's IP address to appropriate sink.
-    fn try_add_to_close(&self, close_nodes: &mut Ktree, friends: &mut HashMap<PublicKey, DhtFriend>, node: PackedNode) -> impl Future<Output = Result<(), HandlePacketError>> {
+    fn try_add_to_close(&self, payload_id: u64, node: PackedNode, check_ping_id: bool) -> impl Future<Output = Result<(), HandlePacketError>> {
+        if check_ping_id && !self.check_ping_id(payload_id, &node.pk) {
+            return future::err(
+                HandlePacketError::from(
+                    HandlePacketErrorKind::PingIdMismatch)
+            ).boxed();
+        }
+
+        let mut close_nodes = self.close_nodes.write();
+        let mut friends = self.friends.write();
         close_nodes.try_add(node);
         for friend in friends.values_mut() {
             friend.try_add_to_close(node);
         }
         if friends.contains_key(&node.pk) {
             let sink = self.friend_saddr_sink.read().clone();
-            Either::Left(
-                maybe_send_unbounded(sink, node)
-                    .map_err(|e| e.context(HandlePacketErrorKind::FriendSaddr).into())
-            )
+            maybe_send_unbounded(sink, node)
+                .map_err(|e| e.context(HandlePacketErrorKind::FriendSaddr).into())
+                .boxed()
         } else {
-            Either::Right(future::ok(()))
+            future::ok(()).boxed()
         }
     }
 
     /// Handle received `PingResponse` packet and if it's correct add the node
     /// that sent this packet to close nodes lists.
-    fn handle_ping_resp(&self, packet: &PingResponse, addr: SocketAddr) -> impl Future<Output = Result<(), HandlePacketError>> + Send {
-        let precomputed_key = self.precomputed_keys.get(packet.pk);
-        let payload = match packet.get_payload(&precomputed_key) {
-            Err(e) => return Either::Left(future::err(e.context(HandlePacketErrorKind::GetPayload).into())),
-            Ok(payload) => payload,
-        };
+    fn handle_ping_resp(&self, packet: PingResponse, addr: SocketAddr) -> impl Future<Output = Result<(), HandlePacketError>> + Send {
+        let server = self.clone();
+        async move {
+            let precomputed_key = server.precomputed_keys.get2(packet.pk).await;
+            let payload = match packet.get_payload(&precomputed_key) {
+                Err(e) => return Err(
+                    e.context(HandlePacketErrorKind::GetPayload).into()),
+                Ok(payload) => payload,
+            };
 
-        if payload.id == 0u64 {
-            return Either::Left(future::err(
-                HandlePacketError::from(HandlePacketErrorKind::ZeroPingId)
-            ))
-        }
+            if payload.id == 0u64 {
+                return Err(
+                    HandlePacketError::from(
+                        HandlePacketErrorKind::ZeroPingId));
+            }
 
-        let mut request_queue = self.request_queue.write();
-
-        if request_queue.check_ping_id(payload.id, |&pk| pk == packet.pk).is_some() {
-            let mut close_nodes = self.close_nodes.write();
-            let mut friends = self.friends.write();
-
-            Either::Right(self.try_add_to_close(&mut close_nodes, &mut friends, PackedNode::new(addr, &packet.pk)))
-        } else {
-            Either::Left(future::err(
-                HandlePacketError::from(HandlePacketErrorKind::PingIdMismatch)
-            ))
+            server.try_add_to_close(
+                payload.id, PackedNode::new(addr, &packet.pk), true).await
         }
     }
 
@@ -930,16 +953,16 @@ impl Server {
             Ok(payload) => payload,
         };
 
-        let mut request_queue = self.request_queue.write();
-
-        if request_queue.check_ping_id(payload.id, |&pk| pk == packet.pk).is_some() {
+        if self.check_ping_id(payload.id, &packet.pk) {
             trace!("Received nodes with NodesResponse from {}: {:?}", addr, payload.nodes);
+
+            let future = self.try_add_to_close(payload.id, PackedNode::new(addr, &packet.pk), false);
 
             let mut close_nodes = self.close_nodes.write();
             let mut friends = self.friends.write();
             let mut nodes_to_bootstrap = self.nodes_to_bootstrap.write();
 
-            let future = self.try_add_to_close(&mut close_nodes, &mut friends, PackedNode::new(addr, &packet.pk));
+
 
             // Process nodes from NodesResponse
             for &node in &payload.nodes {
