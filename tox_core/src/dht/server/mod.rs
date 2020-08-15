@@ -770,7 +770,7 @@ impl Server {
             Packet::PingResponse(packet) =>
                 self.handle_ping_resp(packet, addr).boxed(),
             Packet::NodesRequest(packet) =>
-                self.handle_nodes_req(&packet, addr).boxed(),
+                self.handle_nodes_req(packet, addr).boxed(),
             Packet::NodesResponse(packet) =>
                 self.handle_nodes_resp(&packet, addr).boxed(),
             Packet::CookieRequest(packet) =>
@@ -911,34 +911,36 @@ impl Server {
     /// Handle received `NodesRequest` packet and respond with `NodesResponse`
     /// packet. If node that sent this packet is not present in close nodes list
     /// and can be added there then it will be added to ping list.
-    fn handle_nodes_req(&self, packet: &NodesRequest, addr: SocketAddr)
+    fn handle_nodes_req(&self, packet: NodesRequest, addr: SocketAddr)
         -> impl Future<Output = Result<(), HandlePacketError>> + Send {
-        let precomputed_key = self.precomputed_keys.get(packet.pk);
-        let payload = match packet.get_payload(&precomputed_key) {
-            Err(e) => return Either::Left(future::err(e.context(HandlePacketErrorKind::GetPayload).into())),
-            Ok(payload) => payload,
-        };
+        let server = self.clone();
+        async move {
+            let precomputed_key = server.precomputed_keys.get2(packet.pk).await;
+            let payload = match packet.get_payload(&precomputed_key) {
+                Err(e) => return Err(e.context(HandlePacketErrorKind::GetPayload).into()),
+                Ok(payload) => payload,
+            };
 
-        let close_nodes = self.get_closest(&payload.pk, 4, IsGlobal::is_global(&addr.ip()));
+            let close_nodes = server.get_closest(&payload.pk, 4, IsGlobal::is_global(&addr.ip()));
 
-        let resp_payload = NodesResponsePayload {
-            nodes: close_nodes.into(),
-            id: payload.id,
-        };
-        let nodes_resp = Packet::NodesResponse(NodesResponse::new(
-            &precomputed_key,
-            &self.pk,
-            &resp_payload
-        ));
+            let resp_payload = NodesResponsePayload {
+                nodes: close_nodes.into(),
+                id: payload.id,
+            };
+            let nodes_resp = Packet::NodesResponse(NodesResponse::new(
+                &precomputed_key,
+                &server.pk,
+                &resp_payload,
+            ));
 
-        Either::Right(
             future::try_join(
-                self.ping_add(&PackedNode::new(addr, &packet.pk)),
-                self.send_to(addr, nodes_resp)
+                server.ping_add(&PackedNode::new(addr, &packet.pk)),
+                server.send_to(addr, nodes_resp),
             )
-            .map_ok(drop)
-            .map_err(|e| e.context(HandlePacketErrorKind::SendTo).into())
-        )
+                .map_ok(drop)
+                .map_err(|e| e.context(HandlePacketErrorKind::SendTo).into())
+                .await
+        }
     }
 
     /// Handle received `NodesResponse` packet and if it's correct add the node
