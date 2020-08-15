@@ -1348,6 +1348,22 @@ impl Server {
         }
     }
 
+    /// Adapt `OnionAnnounce.handle_onion_announce_request()`.
+    fn get_onion_announce_ping_id_or_pk(
+        &self,
+        payload: &OnionAnnounceRequestPayload,
+        packet: &OnionAnnounceRequest,
+        addr: SocketAddr
+    ) -> (AnnounceStatus, sha256::Digest) {
+        let mut onion_announce = self.onion_announce.write();
+        onion_announce.handle_onion_announce_request(
+            &payload,
+            packet.inner.pk,
+            packet.onion_return.clone(),
+            addr
+        )
+    }
+
     /// Handle received `OnionAnnounceRequest` packet and response with
     /// `OnionAnnounceResponse` packet if the request succeed.
     ///
@@ -1356,36 +1372,36 @@ impl Server {
     /// nodes to announce.
     fn handle_onion_announce_request(&self, packet: OnionAnnounceRequest, addr: SocketAddr)
         -> impl Future<Output = Result<(), HandlePacketError>> + Send {
-        let mut onion_announce = self.onion_announce.write();
+        let server = self.clone();
+        async move {
+            let shared_secret = server.precomputed_keys.get2(packet.inner.pk).await;
+            let payload = match packet.inner.get_payload(&shared_secret) {
+                Err(e) => return Err(e.context(HandlePacketErrorKind::GetPayload).into()),
+                Ok(payload) => payload,
+            };
 
-        let shared_secret = self.precomputed_keys.get(packet.inner.pk);
-        let payload = match packet.inner.get_payload(&shared_secret) {
-            Err(e) => return Either::Left(future::err(e.context(HandlePacketErrorKind::GetPayload).into())),
-            Ok(payload) => payload,
-        };
+            let (announce_status, ping_id_or_pk) = server.get_onion_announce_ping_id_or_pk(
+                &payload,
+                &packet,
+                addr,
+            );
 
-        let (announce_status, ping_id_or_pk) = onion_announce.handle_onion_announce_request(
-            &payload,
-            packet.inner.pk,
-            packet.onion_return.clone(),
-            addr
-        );
+            let close_nodes = server.get_closest(&payload.search_pk, 4, IsGlobal::is_global(&addr.ip()));
 
-        let close_nodes = self.get_closest(&payload.search_pk, 4, IsGlobal::is_global(&addr.ip()));
+            let response_payload = OnionAnnounceResponsePayload {
+                announce_status,
+                ping_id_or_pk,
+                nodes: close_nodes.into(),
+            };
+            let response = OnionAnnounceResponse::new(&shared_secret, payload.sendback_data, &response_payload);
 
-        let response_payload = OnionAnnounceResponsePayload {
-            announce_status,
-            ping_id_or_pk,
-            nodes: close_nodes.into()
-        };
-        let response = OnionAnnounceResponse::new(&shared_secret, payload.sendback_data, &response_payload);
-
-        Either::Right(self.send_to(addr, Packet::OnionResponse3(OnionResponse3 {
-            onion_return: packet.onion_return,
-            payload: InnerOnionResponse::OnionAnnounceResponse(response)
-        }))
-            .map_err(|e| e.context(HandlePacketErrorKind::SendTo).into())
-        )
+            server.send_to(addr, Packet::OnionResponse3(OnionResponse3 {
+                onion_return: packet.onion_return,
+                payload: InnerOnionResponse::OnionAnnounceResponse(response),
+            }))
+                .map_err(|e| e.context(HandlePacketErrorKind::SendTo).into())
+                .await
+        }
     }
 
     /// Handle received `OnionDataRequest` packet and send `OnionResponse3`
