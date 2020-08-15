@@ -1104,46 +1104,49 @@ impl Server {
     fn handle_dht_req(&self, packet: DhtRequest, addr: SocketAddr)
         -> impl Future<Output = Result<(), HandlePacketError>> + Send { // TODO: split to functions
         if packet.rpk == self.pk { // the target peer is me
-            Either::Left(self.handle_dht_req_for_us(&packet, addr))
+            Either::Left(self.handle_dht_req_for_us(packet, addr))
         } else {
             Either::Right(self.handle_dht_req_for_others(packet))
         }
     }
 
     /// Parse received `DhtRequest` packet and handle the payload.
-    fn handle_dht_req_for_us(&self, packet: &DhtRequest, addr: SocketAddr)
+    fn handle_dht_req_for_us(&self, packet: DhtRequest, addr: SocketAddr)
         -> impl Future<Output = Result<(), HandlePacketError>> + Send {
-        let precomputed_key = self.precomputed_keys.get(packet.spk);
-        let payload = packet.get_payload(&precomputed_key);
-        let payload = match payload {
-            Err(e) => return future::err(e.context(HandlePacketErrorKind::GetPayload).into()).boxed(),
-            Ok(payload) => payload,
-        };
+        let server = self.clone();
+        async move {
+            let precomputed_key = server.precomputed_keys.get2(packet.spk).await;
+            let payload = packet.get_payload(&precomputed_key);
+            let payload = match payload {
+                Err(e) => return Err(e.context(HandlePacketErrorKind::GetPayload).into()),
+                Ok(payload) => payload,
+            };
 
-        match payload {
-            DhtRequestPayload::NatPingRequest(nat_payload) => {
-                debug!("Received nat ping request");
-                self.handle_nat_ping_req(nat_payload, &packet.spk, addr).boxed()
-            },
-            DhtRequestPayload::NatPingResponse(nat_payload) => {
-                debug!("Received nat ping response");
-                self.handle_nat_ping_resp(nat_payload, &packet.spk).boxed()
-            },
-            DhtRequestPayload::DhtPkAnnounce(_dht_pk_payload) => {
-                debug!("Received DHT PublicKey Announce");
-                // TODO: handle this packet in onion client
-                future::ok(()).boxed()
-            },
-            DhtRequestPayload::HardeningRequest(_dht_pk_payload) => {
-                debug!("Received Hardening request");
-                // TODO: implement handler
-                future::ok(()).boxed()
-            },
-            DhtRequestPayload::HardeningResponse(_dht_pk_payload) => {
-                debug!("Received Hardening response");
-                // TODO: implement handler
-                future::ok(()).boxed()
-            },
+            match payload {
+                DhtRequestPayload::NatPingRequest(nat_payload) => {
+                    debug!("Received nat ping request");
+                    server.handle_nat_ping_req(nat_payload, &packet.spk, addr).await
+                }
+                DhtRequestPayload::NatPingResponse(nat_payload) => {
+                    debug!("Received nat ping response");
+                    server.handle_nat_ping_resp(nat_payload, &packet.spk).await
+                }
+                DhtRequestPayload::DhtPkAnnounce(_dht_pk_payload) => {
+                    debug!("Received DHT PublicKey Announce");
+                    // TODO: handle this packet in onion client
+                    Ok(())
+                }
+                DhtRequestPayload::HardeningRequest(_dht_pk_payload) => {
+                    debug!("Received Hardening request");
+                    // TODO: implement handler
+                    Ok(())
+                }
+                DhtRequestPayload::HardeningResponse(_dht_pk_payload) => {
+                    debug!("Received Hardening response");
+                    // TODO: implement handler
+                    Ok(())
+                }
+            }
         }
     }
 
