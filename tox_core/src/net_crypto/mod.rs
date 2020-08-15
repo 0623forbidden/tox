@@ -394,44 +394,62 @@ impl NetCrypto {
     }
 
     /// Create `CookieResponse` packet with `Cookie` requested by `CookieRequest` packet
-    fn handle_cookie_request(&self, packet: &CookieRequest) -> Result<CookieResponse, HandlePacketError> {
-        let payload = packet.get_payload(&self.precomputed_keys.get(packet.pk))
-            .map_err(|e| e.context(HandlePacketErrorKind::GetPayload))?;
+    fn handle_cookie_request(&self, packet: CookieRequest)
+        -> impl Future<Output = Result<CookieResponse, HandlePacketError>> + Send {
+        let net_crypto = self.clone();
+        async move {
+            let payload = packet
+                .get_payload(&net_crypto.precomputed_keys.get2(packet.pk).await)
+                .map_err(|e| e.context(HandlePacketErrorKind::GetPayload))?;
 
-        let cookie = Cookie::new(payload.pk, packet.pk);
-        let encrypted_cookie = EncryptedCookie::new(&self.symmetric_key, &cookie);
+            let cookie = Cookie::new(payload.pk, packet.pk);
+            let encrypted_cookie = EncryptedCookie::new(&net_crypto.symmetric_key, &cookie);
 
-        let response_payload = CookieResponsePayload {
-            cookie: encrypted_cookie,
-            id: payload.id,
-        };
-        let precomputed_key = precompute(&packet.pk, &self.dht_sk);
-        let response = CookieResponse::new(&precomputed_key, &response_payload);
+            let response_payload = CookieResponsePayload {
+                cookie: encrypted_cookie,
+                id: payload.id,
+            };
+            let precomputed_key = precompute(&packet.pk, &net_crypto.dht_sk);
+            let response = CookieResponse::new(&precomputed_key, &response_payload);
 
-        Ok(response)
-    }
-
-    /// Handle `CookieRequest` packet received from UDP socket
-    pub fn handle_udp_cookie_request(&self, packet: &CookieRequest, addr: SocketAddr) -> impl Future<Output = Result<(), HandlePacketError>> + Send {
-        match self.handle_cookie_request(packet) {
-            Ok(response) => Either::Left(self.send_to_udp(addr, DhtPacket::CookieResponse(response))
-                .map_err(|e| e.context(HandlePacketErrorKind::SendTo).into())),
-            Err(e) => Either::Right(future::err(e))
+            Ok(response)
         }
     }
 
-    /// Handle `CookieRequest` packet received from TCP socket
-    pub fn handle_tcp_cookie_request(&self, packet: &CookieRequest, sender_pk: PublicKey) -> impl Future<Output = Result<(), HandlePacketError>> + Send {
-        match self.handle_cookie_request(packet) {
-            Ok(response) => {
-                let msg = (TcpDataPayload::CookieResponse(response), sender_pk);
+    /// Handle `CookieRequest` packet received from UDP socket
+    pub fn handle_udp_cookie_request(&self, packet: CookieRequest, addr: SocketAddr)
+        -> impl Future<Output = Result<(), HandlePacketError>> + Send {
+        let net_crypto = self.clone();
+        async move {
+            match net_crypto.handle_cookie_request(packet).await {
+                Ok(response) => {
+                    net_crypto.send_to_udp(addr, DhtPacket::CookieResponse(response))
+                        .map_err(|e| e.context(HandlePacketErrorKind::SendTo).into()).await
+                },
+                Err(e) => Err(e)
+            }
+        }
+    }
 
-                Either::Left(
-                    maybe_send_bounded(self.tcp_tx.read().clone(), msg)
-                        .map_err(|e| e.context(HandlePacketErrorKind::SendTo).into())
-                )
-            },
-            Err(e) => Either::Right(future::err(e))
+    /// Adapt `maybe_send_bounded()`.
+    fn tcp_tx_send(&self, msg: (TcpDataPayload, PublicKey))
+        -> impl Future<Output = Result<(), HandlePacketError>> + Send {
+        maybe_send_bounded(self.tcp_tx.read().clone(), msg)
+            .map_err(|e| e.context(HandlePacketErrorKind::SendTo).into())
+    }
+
+    /// Handle `CookieRequest` packet received from TCP socket
+    pub fn handle_tcp_cookie_request(&self, packet: CookieRequest, sender_pk: PublicKey)
+        -> impl Future<Output = Result<(), HandlePacketError>> + Send {
+        let net_crypto = self.clone();
+        async move {
+            match net_crypto.handle_cookie_request(packet).await {
+                Ok(response) => {
+                    let msg = (TcpDataPayload::CookieResponse(response), sender_pk);
+                    net_crypto.tcp_tx_send(msg).await
+                }
+                Err(e) => Err(e)
+            }
         }
     }
 
@@ -1264,8 +1282,8 @@ mod tests {
         assert!(!net_crypto.friends.read().contains(&peer_real_pk));
     }
 
-    #[test]
-    fn handle_cookie_request() {
+    #[tokio::test]
+    async fn handle_cookie_request() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
@@ -1295,7 +1313,7 @@ mod tests {
         };
         let cookie_request = CookieRequest::new(&precomputed_key, &peer_dht_pk, &cookie_request_payload);
 
-        let cookie_response = net_crypto.handle_cookie_request(&cookie_request).unwrap();
+        let cookie_response = net_crypto.handle_cookie_request(cookie_request).await.unwrap();
         let cookie_response_payload = cookie_response.get_payload(&precomputed_key).unwrap();
 
         assert_eq!(cookie_response_payload.id, cookie_request_id);
@@ -1331,7 +1349,7 @@ mod tests {
             payload: vec![42; 88]
         };
 
-        let res = net_crypto.handle_cookie_request(&cookie_request);
+        let res = net_crypto.handle_cookie_request(cookie_request).await;
         assert!(res.is_err());
         assert_eq!(*res.err().unwrap().kind(), HandlePacketErrorKind::GetPayload);
     }
@@ -1369,7 +1387,7 @@ mod tests {
 
         let addr = "127.0.0.1:12345".parse().unwrap();
 
-        net_crypto.handle_udp_cookie_request(&cookie_request, addr).await.unwrap();
+        net_crypto.handle_udp_cookie_request(cookie_request, addr).await.unwrap();
 
         let (received, _udp_rx) = udp_rx.into_future().await;
         let (packet, addr_to_send) = received.unwrap();
@@ -1420,7 +1438,7 @@ mod tests {
         };
         let cookie_request = CookieRequest::new(&precomputed_key, &peer_dht_pk, &cookie_request_payload);
 
-        net_crypto.handle_tcp_cookie_request(&cookie_request, peer_dht_pk).await.unwrap();
+        net_crypto.handle_tcp_cookie_request(cookie_request, peer_dht_pk).await.unwrap();
 
         let (received, _net_crypto_tcp_rx) = net_crypto_tcp_rx.into_future().await;
         let (packet, pk_to_send) = received.unwrap();
@@ -1465,7 +1483,7 @@ mod tests {
 
         let addr = "127.0.0.1:12345".parse().unwrap();
 
-        let res = net_crypto.handle_udp_cookie_request(&cookie_request, addr).await;
+        let res = net_crypto.handle_udp_cookie_request(cookie_request, addr).await;
         assert!(res.is_err());
         assert_eq!(*res.err().unwrap().kind(), HandlePacketErrorKind::GetPayload);
     }

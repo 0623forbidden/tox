@@ -774,7 +774,7 @@ impl Server {
             Packet::NodesResponse(packet) =>
                 self.handle_nodes_resp(packet, addr).boxed(),
             Packet::CookieRequest(packet) =>
-                self.handle_cookie_request(&packet, addr).boxed(),
+                self.handle_cookie_request(packet, addr).boxed(),
             Packet::CookieResponse(packet) =>
                 self.handle_cookie_response(&packet, addr).boxed(),
             Packet::CryptoHandshake(packet) =>
@@ -1020,7 +1020,7 @@ impl Server {
 
     /// Handle received `CookieRequest` packet and pass it to `net_crypto`
     /// module.
-    fn handle_cookie_request(&self, packet: &CookieRequest, addr: SocketAddr)
+    fn handle_cookie_request(&self, packet: CookieRequest, addr: SocketAddr)
         -> impl Future<Output = Result<(), HandlePacketError>> + Send {
         if let Some(ref net_crypto) = self.net_crypto {
             Either::Left(net_crypto.handle_udp_cookie_request(packet, addr)
