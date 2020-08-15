@@ -772,7 +772,7 @@ impl Server {
             Packet::NodesRequest(packet) =>
                 self.handle_nodes_req(packet, addr).boxed(),
             Packet::NodesResponse(packet) =>
-                self.handle_nodes_resp(&packet, addr).boxed(),
+                self.handle_nodes_resp(packet, addr).boxed(),
             Packet::CookieRequest(packet) =>
                 self.handle_cookie_request(&packet, addr).boxed(),
             Packet::CookieResponse(packet) =>
@@ -943,54 +943,63 @@ impl Server {
         }
     }
 
+    /// Add nodes to bootstrap nodes list to send `NodesRequest` packet to them
+    /// later.
+    fn add_bootstrap_nodes(&self, nodes: &Vec<PackedNode>, packet_pk: &PublicKey) {
+        let mut close_nodes = self.close_nodes.write();
+        let mut friends = self.friends.write();
+        let mut nodes_to_bootstrap = self.nodes_to_bootstrap.write();
+
+        // Process nodes from NodesResponse
+        for &node in nodes {
+            if !self.is_ipv6_enabled && node.saddr.is_ipv6() {
+                continue;
+            }
+
+            if close_nodes.can_add(&node) {
+                nodes_to_bootstrap.try_add(&self.pk, node, /* evict */ true);
+            }
+
+            for friend in friends.values_mut() {
+                if friend.can_add_to_close(&node) {
+                    friend.nodes_to_bootstrap.try_add(&friend.pk, node, /* evict */ true);
+                }
+            }
+
+            self.update_returned_addr(&node, packet_pk, &mut close_nodes, &mut friends);
+        }
+    }
+
     /// Handle received `NodesResponse` packet and if it's correct add the node
     /// that sent this packet to close nodes lists. Nodes from response will be
     /// added to bootstrap nodes list to send `NodesRequest` packet to them
     /// later.
-    fn handle_nodes_resp(&self, packet: &NodesResponse, addr: SocketAddr)
+    fn handle_nodes_resp(&self, packet: NodesResponse, addr: SocketAddr)
         -> impl Future<Output = Result<(), HandlePacketError>> + Send {
-        let precomputed_key = self.precomputed_keys.get(packet.pk);
-        let payload = match packet.get_payload(&precomputed_key) {
-            Err(e) => return Either::Left(future::err(e.context(HandlePacketErrorKind::GetPayload).into())),
-            Ok(payload) => payload,
-        };
+        let server = self.clone();
+        async move {
+            let precomputed_key = server.precomputed_keys.get2(packet.pk).await;
 
-        if self.check_ping_id(payload.id, &packet.pk) {
-            trace!("Received nodes with NodesResponse from {}: {:?}", addr, payload.nodes);
+            let payload = match packet.get_payload(&precomputed_key) {
+                Err(e) => return Err(e.context(HandlePacketErrorKind::GetPayload).into()),
+                Ok(payload) => payload,
+            };
 
-            let future = self.try_add_to_close(payload.id, PackedNode::new(addr, &packet.pk), false);
+            if server.check_ping_id(payload.id, &packet.pk) {
+                trace!("Received nodes with NodesResponse from {}: {:?}", addr, payload.nodes);
 
-            let mut close_nodes = self.close_nodes.write();
-            let mut friends = self.friends.write();
-            let mut nodes_to_bootstrap = self.nodes_to_bootstrap.write();
+                let future = server.try_add_to_close(payload.id, PackedNode::new(addr, &packet.pk), false);
 
+                // Process nodes from NodesResponse
+                server.add_bootstrap_nodes(&payload.nodes, &packet.pk);
 
-
-            // Process nodes from NodesResponse
-            for &node in &payload.nodes {
-                if !self.is_ipv6_enabled && node.saddr.is_ipv6() {
-                    continue;
-                }
-
-                if close_nodes.can_add(&node) {
-                    nodes_to_bootstrap.try_add(&self.pk, node, /* evict */ true);
-                }
-
-                for friend in friends.values_mut() {
-                    if friend.can_add_to_close(&node) {
-                        friend.nodes_to_bootstrap.try_add(&friend.pk, node, /* evict */ true);
-                    }
-                }
-
-                self.update_returned_addr(&node, &packet.pk, &mut close_nodes, &mut friends);
+                future.await
+            } else {
+                // Some old version toxcore responds with wrong ping_id.
+                // So we do not treat this as our own error.
+                trace!("NodesResponse.ping_id does not match");
+                Ok(())
             }
-
-            Either::Right(future)
-        } else {
-            // Some old version toxcore responds with wrong ping_id.
-            // So we do not treat this as our own error.
-            trace!("NodesResponse.ping_id does not match");
-            Either::Left(future::ok(()))
         }
     }
 
