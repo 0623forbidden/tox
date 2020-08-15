@@ -1125,7 +1125,7 @@ impl Server {
             match payload {
                 DhtRequestPayload::NatPingRequest(nat_payload) => {
                     debug!("Received nat ping request");
-                    server.handle_nat_ping_req(nat_payload, &packet.spk, addr).await
+                    server.handle_nat_ping_req(nat_payload, packet.spk, addr).await
                 }
                 DhtRequestPayload::NatPingResponse(nat_payload) => {
                     debug!("Received nat ping response");
@@ -1163,31 +1163,40 @@ impl Server {
         }
     }
 
+    /// Set last received ping time for `DhtFriend`.
+    fn set_friend_hole_punch_last_recv_ping_time(&self, spk: &PublicKey, ping_time: Instant)
+        -> Result<(), HandlePacketError> {
+        let mut friends = self.friends.write();
+        match friends.get_mut(spk) {
+            None => Err(HandlePacketError::from(HandlePacketErrorKind::NoFriend)),
+            Some(friend) => {
+                friend.hole_punch.last_recv_ping_time = ping_time;
+                Ok(())
+            }
+        }
+    }
+
     /// Handle received `NatPingRequest` packet and respond with
     /// `NatPingResponse` packet.
-    fn handle_nat_ping_req(&self, payload: NatPingRequest, spk: &PublicKey, addr: SocketAddr)
+    fn handle_nat_ping_req(&self, payload: NatPingRequest, spk: PublicKey, addr: SocketAddr)
         -> impl Future<Output = Result<(), HandlePacketError>> + Send {
-        let mut friends = self.friends.write();
+        let server = self.clone();
+        async move {
+            server.set_friend_hole_punch_last_recv_ping_time(&spk, clock_now())?;
 
-        let friend = match friends.get_mut(spk) {
-            None => return Either::Left( future::err(
-                HandlePacketError::from(HandlePacketErrorKind::NoFriend))),
-            Some(friend) => friend,
-        };
-
-        friend.hole_punch.last_recv_ping_time = clock_now();
-
-        let resp_payload = DhtRequestPayload::NatPingResponse(NatPingResponse {
-            id: payload.id,
-        });
-        let nat_ping_resp = Packet::DhtRequest(DhtRequest::new(
-            &self.precomputed_keys.get(*spk),
-            spk,
-            &self.pk,
-            &resp_payload
-        ));
-        Either::Right(self.send_to(addr, nat_ping_resp)
-            .map_err(|e| e.context(HandlePacketErrorKind::SendTo).into()))
+            let resp_payload = DhtRequestPayload::NatPingResponse(NatPingResponse {
+                id: payload.id,
+            });
+            let nat_ping_resp = Packet::DhtRequest(DhtRequest::new(
+                &server.precomputed_keys.get2(spk).await,
+                &spk,
+                &server.pk,
+                &resp_payload,
+            ));
+            server.send_to(addr, nat_ping_resp)
+                .map_err(|e| e.context(HandlePacketErrorKind::SendTo).into())
+                .await
+        }
     }
 
     /// Handle received `NatPingResponse` packet and enable hole punching if
