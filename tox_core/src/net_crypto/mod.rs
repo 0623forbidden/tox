@@ -302,11 +302,10 @@ impl NetCrypto {
     /// Kill a connection sending `PACKET_ID_KILL` packet and removing it from
     /// the connections list.
     pub fn kill_connection(&self, real_pk: PublicKey) -> impl Future<Output = Result<(), KillConnectionError>> {
-        if let Some(mut connection) = self.connections.write().remove(&real_pk) {
-            let mut connection_write = connection.write();
-            self.clear_keys_by_addr(&connection_write);
+        if let Some(connection) = self.connections.write().remove(&real_pk) {
+            self.clear_keys_by_addr(&connection.read());
 
-            let status_future = self.send_connection_status(&connection_write, false)
+            let status_future = self.send_connection_status(&connection.read(), false)
                 .map_err(|e| e.context(KillConnectionErrorKind::SendToConnectionStatus).into());
             let kill_future = self.send_kill_packet(connection.clone())
                 .map_err(|e| e.context(KillConnectionErrorKind::SendTo).into());
