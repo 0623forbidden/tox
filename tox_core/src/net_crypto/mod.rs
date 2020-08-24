@@ -353,7 +353,7 @@ impl NetCrypto {
             return Either::Right(future::err(SendLosslessPacketErrorKind::InvalidPacketId.into()));
         }
 
-        if let Some(mut connection) = self.connections.read().get(&real_pk) {
+        if let Some(connection) = self.connections.read().get(&real_pk) {
             let mut connection_write = connection.write();
             let packet_number = connection_write.send_array.buffer_end;
             if let Err(e) = connection_write.send_array.push_back(SentPacket::new(packet.clone())) {
@@ -520,7 +520,7 @@ impl NetCrypto {
     pub fn handle_tcp_cookie_response(&self, packet: CookieResponse, sender_pk: PublicKey)
         -> impl Future<Output = Result<(), HandlePacketError>> + Send {
         let connection = self.connection_by_dht_key(sender_pk);
-        if let Some(mut connection) = connection {
+        if let Some(connection) = connection {
             Either::Left(self.handle_cookie_response(connection.clone(), packet))
         } else {
             Either::Right(future::err(
@@ -1008,21 +1008,22 @@ impl NetCrypto {
         // TODO: can backpressure be used instead of congestion control? It
         // seems it's possible to implement wrapper for bounded sender with
         // priority queue and just send packets there
-        let udp_future = if let Some(addr) = connection.read().get_udp_addr() {
-            if connection.read().is_udp_alive() {
+        let mut connection = connection.write();
+        let udp_future = if let Some(addr) = connection.get_udp_addr() {
+            if connection.is_udp_alive() {
                 return Either::Left(Box::new(self.send_to_udp(addr, packet.into()))
                     .map_err(|e| e.context(SendPacketErrorKind::Udp).into()))
             }
 
             let dht_packet: DhtPacket = packet.clone().into();
-            let udp_attempt_should_be_made = connection.read().udp_attempt_should_be_made() && {
+            let udp_attempt_should_be_made = connection.udp_attempt_should_be_made() && {
                 // check if the packet is not too big
                 let mut buf = [0; DHT_ATTEMPT_MAX_PACKET_LENGTH];
                 dht_packet.to_bytes((&mut buf, 0)).is_ok()
             };
 
             if udp_attempt_should_be_made {
-                connection.write().update_udp_send_attempt_time();
+                connection.update_udp_send_attempt_time();
                 Either::Left(self.send_to_udp(addr, dht_packet))
             } else {
                 Either::Right(future::ok(()))
@@ -1035,7 +1036,7 @@ impl NetCrypto {
             .map_err(|e| e.context(SendPacketErrorKind::Udp).into());
 
         let tcp_tx = self.tcp_tx.read().clone();
-        let tcp_future = maybe_send_bounded(tcp_tx, (packet.into(), connection.read().peer_dht_pk.clone()))
+        let tcp_future = maybe_send_bounded(tcp_tx, (packet.into(), connection.peer_dht_pk.clone()))
             .map_err(|e| e.context(SendPacketErrorKind::Tcp).into());
 
         Either::Right(
