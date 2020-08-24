@@ -354,12 +354,12 @@ impl NetCrypto {
         }
 
         if let Some(connection) = self.connections.read().get(&real_pk) {
-            let mut connection_write = connection.write();
-            let packet_number = connection_write.send_array.buffer_end;
-            if let Err(e) = connection_write.send_array.push_back(SentPacket::new(packet.clone())) {
+            let packet_number = connection.read().send_array.buffer_end;
+            let add_packet_result = connection.write().send_array.push_back(SentPacket::new(packet.clone()));
+            if let Err(e) = add_packet_result {
                 Either::Right(future::err(e.context(SendLosslessPacketErrorKind::FullSendArray).into()))
             } else {
-                connection_write.packets_sent += 1;
+                connection.write().packets_sent += 1;
                 Either::Left(self.send_data_packet(connection.clone(), packet, packet_number)
                     .map_err(|e| e.context(SendLosslessPacketErrorKind::SendTo).into()))
             }
