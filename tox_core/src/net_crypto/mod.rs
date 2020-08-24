@@ -398,7 +398,7 @@ impl NetCrypto {
         let net_crypto = self.clone();
         async move {
             let payload = packet
-                .get_payload(&net_crypto.precomputed_keys.get2(packet.pk).await)
+                .get_payload(&net_crypto.precomputed_keys.get(packet.pk).await)
                 .map_err(|e| e.context(HandlePacketErrorKind::GetPayload))?;
 
             let cookie = Cookie::new(payload.pk, packet.pk);
@@ -467,7 +467,7 @@ impl NetCrypto {
 
             let peer_dht_pk = connection.read().peer_dht_pk.clone();
             let payload = match packet.get_payload(
-                &net_crypto.precomputed_keys.get2(peer_dht_pk).await)
+                &net_crypto.precomputed_keys.get(peer_dht_pk).await)
             {
                 Ok(payload) => payload,
                 Err(e) => return Err(e.context(HandlePacketErrorKind::GetPayload).into()),

@@ -645,7 +645,7 @@ impl Server {
         let node = node.clone();
         async move {
             let ping_req = Packet::PingRequest(PingRequest::new(
-                &server.precomputed_keys.get2(node.pk).await,
+                &server.precomputed_keys.get(node.pk).await,
                 &server.pk,
                 &payload,
             ));
@@ -671,7 +671,7 @@ impl Server {
         Either::Right(
             async move {
                 let nodes_req = Packet::NodesRequest(NodesRequest::new(
-                    &server.precomputed_keys.get2(node.pk).await,
+                    &server.precomputed_keys.get(node.pk).await,
                     &server.pk,
                     &payload,
                 ));
@@ -704,7 +704,7 @@ impl Server {
                     let friend = friend.clone();
                     let nat_ping_future = async move {
                         let nat_ping_req_packet = DhtRequest::new(
-                            &server.precomputed_keys.get2(friend.pk).await,
+                            &server.precomputed_keys.get(friend.pk).await,
                             &friend.pk,
                             &server.pk,
                             &payload,
@@ -734,7 +734,7 @@ impl Server {
         let friend_pk = friend.pk.clone();
         async move {
             let packet = Packet::PingRequest(PingRequest::new(
-                &server.precomputed_keys.get2(friend_pk).await,
+                &server.precomputed_keys.get(friend_pk).await,
                 &server.pk,
                 &payload,
             ));
@@ -828,7 +828,7 @@ impl Server {
         -> impl Future<Output = Result<(), HandlePacketError>> + Send {
         let server = self.clone();
         async move {
-            let precomputed_key = server.precomputed_keys.get2(packet.pk).await;
+            let precomputed_key = server.precomputed_keys.get(packet.pk).await;
             let payload = match packet.get_payload(&precomputed_key) {
                 Err(e) => return future::err(e.context(HandlePacketErrorKind::GetPayload).into()).await,
                 Ok(payload) => payload,
@@ -890,7 +890,7 @@ impl Server {
     fn handle_ping_resp(&self, packet: PingResponse, addr: SocketAddr) -> impl Future<Output = Result<(), HandlePacketError>> + Send {
         let server = self.clone();
         async move {
-            let precomputed_key = server.precomputed_keys.get2(packet.pk).await;
+            let precomputed_key = server.precomputed_keys.get(packet.pk).await;
             let payload = match packet.get_payload(&precomputed_key) {
                 Err(e) => return Err(
                     e.context(HandlePacketErrorKind::GetPayload).into()),
@@ -915,7 +915,7 @@ impl Server {
         -> impl Future<Output = Result<(), HandlePacketError>> + Send {
         let server = self.clone();
         async move {
-            let precomputed_key = server.precomputed_keys.get2(packet.pk).await;
+            let precomputed_key = server.precomputed_keys.get(packet.pk).await;
             let payload = match packet.get_payload(&precomputed_key) {
                 Err(e) => return Err(e.context(HandlePacketErrorKind::GetPayload).into()),
                 Ok(payload) => payload,
@@ -978,7 +978,7 @@ impl Server {
         -> impl Future<Output = Result<(), HandlePacketError>> + Send {
         let server = self.clone();
         async move {
-            let precomputed_key = server.precomputed_keys.get2(packet.pk).await;
+            let precomputed_key = server.precomputed_keys.get(packet.pk).await;
 
             let payload = match packet.get_payload(&precomputed_key) {
                 Err(e) => return Err(e.context(HandlePacketErrorKind::GetPayload).into()),
@@ -1115,7 +1115,7 @@ impl Server {
         -> impl Future<Output = Result<(), HandlePacketError>> + Send {
         let server = self.clone();
         async move {
-            let precomputed_key = server.precomputed_keys.get2(packet.spk).await;
+            let precomputed_key = server.precomputed_keys.get(packet.spk).await;
             let payload = packet.get_payload(&precomputed_key);
             let payload = match payload {
                 Err(e) => return Err(e.context(HandlePacketErrorKind::GetPayload).into()),
@@ -1188,7 +1188,7 @@ impl Server {
                 id: payload.id,
             });
             let nat_ping_resp = Packet::DhtRequest(DhtRequest::new(
-                &server.precomputed_keys.get2(spk).await,
+                &server.precomputed_keys.get(spk).await,
                 &spk,
                 &server.pk,
                 &resp_payload,
@@ -1264,7 +1264,7 @@ impl Server {
         );
         let server = self.clone();
         async move {
-            let shared_secret = server.precomputed_keys.get2(packet.temporary_pk).await;
+            let shared_secret = server.precomputed_keys.get(packet.temporary_pk).await;
             let payload = packet.get_payload(&shared_secret);
             let payload = match payload {
                 Err(e) => return Err(e.context(HandlePacketErrorKind::GetPayload).into()),
@@ -1295,7 +1295,7 @@ impl Server {
         );
         let server = self.clone();
         async move {
-            let shared_secret = server.precomputed_keys.get2(packet.temporary_pk).await;
+            let shared_secret = server.precomputed_keys.get(packet.temporary_pk).await;
             let payload = packet.get_payload(&shared_secret);
             let payload = match payload {
                 Err(e) => return Err(e.context(HandlePacketErrorKind::GetPayload).into()),
@@ -1325,7 +1325,7 @@ impl Server {
         );
         let server = self.clone();
         async move {
-            let shared_secret = server.precomputed_keys.get2(packet.temporary_pk).await;
+            let shared_secret = server.precomputed_keys.get(packet.temporary_pk).await;
             let payload = packet.get_payload(&shared_secret);
             let payload = match payload {
                 Err(e) => return Err(e.context(HandlePacketErrorKind::GetPayload).into()),
@@ -1374,7 +1374,7 @@ impl Server {
         -> impl Future<Output = Result<(), HandlePacketError>> + Send {
         let server = self.clone();
         async move {
-            let shared_secret = server.precomputed_keys.get2(packet.inner.pk).await;
+            let shared_secret = server.precomputed_keys.get(packet.inner.pk).await;
             let payload = match packet.inner.get_payload(&shared_secret) {
                 Err(e) => return Err(e.context(HandlePacketErrorKind::GetPayload).into()),
                 Ok(payload) => payload,
